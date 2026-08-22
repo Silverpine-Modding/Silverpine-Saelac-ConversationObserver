@@ -3,7 +3,7 @@
     <TargetFramework>netstandard2.1</TargetFramework>
     <AssemblyName>ConversationObserver</AssemblyName>
     <Product>Conversation Observer</Product>
-    <Version>1.0.1</Version>
+    <Version>1.0.4</Version>
     <LangVersion>latest</LangVersion>
     <RestoreAdditionalProjectSources>
       https://api.nuget.org/v3/index.json;

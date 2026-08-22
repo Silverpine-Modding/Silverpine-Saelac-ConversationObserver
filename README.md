@@ -11,9 +11,20 @@ named **Step Away** whenever at least two NPCs are participating.
    from next-speaker selection and from the scene instructions.
 4. Choose **Interrupt** to bring the player back.
 
+Automatic NPC turns include hidden system boundaries so Silverpine's native
+dialogue-history pruning remains valid during long NPC-only exchanges.
+
+While away, a Modding Tools prompt transform begins the generated conversation
+context at the departure notice, removes player-authored turns and
+player-specific prompt scaffolding, and changes Silverpine's normal
+second-person player POV to third-person narration centered on the NPCs still
+present. These changes affect prompt copies only; **Interrupt** restores normal
+prompt construction without altering the stored conversation history.
+
 While the player is away, the player portrait slot shows a different active
 participant from the NPC in the normal NPC slot. The two slots never select the
-same NPC.
+same NPC. Custom-NPC portraits use their original player-side scale and offset
+metadata instead of their mirrored NPC-side coordinates.
 
 ## Optional impersonation support
 
@@ -26,7 +37,7 @@ portrait; if that NPC is already the active speaker, another NPC is shown so
 the portrait slots never duplicate one another. **Interrupt** remains the only
 way to rejoin.
 
-Salt Dialogue Impersonator 1.1.1 registers this optional hook.
+Salt Dialogue Impersonator 1.2.1 registers this optional hook.
 
 ## Credits
 

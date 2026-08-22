@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using TMPro;
 using UnityEngine;
@@ -15,12 +16,12 @@ namespace ConversationObserver;
 [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
 [BepInDependency(
     Silverpine.ModdingTools.Plugin.PluginGuid,
-    "1.9.0")]
+    "1.9.3")]
 public sealed class Plugin : BaseUnityPlugin
 {
     public const string PluginGuid = "salt.silverpine.conversationobserver";
     public const string PluginName = "Conversation Observer";
-    public const string PluginVersion = "1.0.1";
+    public const string PluginVersion = "1.0.4";
 
     private Harmony _harmony;
 
@@ -35,8 +36,11 @@ public sealed class Plugin : BaseUnityPlugin
 
 internal static class ConversationObserverController
 {
+    private const float PortraitSideOffsetX = 177f;
     private const string StepAwayActionId =
         Plugin.PluginGuid + ".step-away";
+    private const string AwayPromptTransformId =
+        Plugin.PluginGuid + ".away-prompt";
     private const string ActingButtonPrefix = "Speak as ";
 
     private static readonly FieldInfo InputField =
@@ -53,6 +57,16 @@ internal static class ConversationObserverController
 
     internal static void RegisterAction()
     {
+        DialoguePromptTransforms.Register(
+            Plugin.PluginGuid,
+            new DialoguePromptTransformDefinition
+            {
+                Id = AwayPromptTransformId,
+                Order = -1000,
+                IsActive = _ => IsPlayerAway,
+                TransformHistory = FilterAwayPromptHistory,
+                TransformText = TransformAwayPromptText
+            });
         DialogueActions.Register(
             Plugin.PluginGuid,
             new DialogueActionDefinition
@@ -136,6 +150,195 @@ internal static class ConversationObserverController
         return participants[0];
     }
 
+    internal static void RecordAwayContinuationBoundary(
+        NeuralNPC nextSpeaker)
+    {
+        if (!IsPlayerAway || nextSpeaker == null)
+        {
+            return;
+        }
+
+        AddSystemTurn(
+            GetParticipants(),
+            "Only the NPCs still present may speak. Next speaker: "
+            + nextSpeaker.GetFinalName() + ".");
+    }
+
+    private static IEnumerable<NeuralNPC.DialogElement>
+        FilterAwayPromptHistory(
+            DialoguePromptContext context,
+            IReadOnlyList<NeuralNPC.DialogElement> history)
+    {
+        string playerName = context.Player != null
+            ? context.Player.playerName
+            : GetPlayerName();
+        string departurePrefix = playerName
+            + " stepped away and is no longer present in this conversation.";
+        int departureIndex = -1;
+        for (int index = history.Count - 1; index >= 0; index--)
+        {
+            NeuralNPC.DialogElement element = history[index];
+            if (element.speakerType == SpeakerType.System &&
+                element.contents.StartsWith(
+                    departurePrefix,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                departureIndex = index;
+                break;
+            }
+        }
+
+        if (departureIndex < 0)
+        {
+            return history.Where(element =>
+                element.speakerType != SpeakerType.Player);
+        }
+
+        var filtered = new List<NeuralNPC.DialogElement>();
+        for (int index = departureIndex; index < history.Count; index++)
+        {
+            NeuralNPC.DialogElement element = history[index];
+            if (element.speakerType == SpeakerType.Player)
+            {
+                continue;
+            }
+            if (index == departureIndex)
+            {
+                filtered.Add(element);
+                continue;
+            }
+            if (element.speakerType == SpeakerType.System &&
+                TrySanitizeImpersonatedTurn(element, out string sanitized))
+            {
+                filtered.Add(new NeuralNPC.DialogElement(
+                    SpeakerType.System,
+                    sanitized,
+                    element.turnCount));
+                continue;
+            }
+            if (element.speakerType == SpeakerType.System &&
+                ContainsPlayerScaffolding(element.contents, playerName))
+            {
+                continue;
+            }
+            filtered.Add(element);
+        }
+        return filtered;
+    }
+
+    private static bool TrySanitizeImpersonatedTurn(
+        NeuralNPC.DialogElement element,
+        out string sanitized)
+    {
+        const string prefix =
+            "The preceding line was directly spoken in-scene by ";
+        sanitized = "";
+        if (!element.contents.StartsWith(
+                prefix,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        int actorEnd = element.contents.IndexOf(
+            ", not by ",
+            prefix.Length,
+            StringComparison.OrdinalIgnoreCase);
+        if (actorEnd <= prefix.Length)
+        {
+            return false;
+        }
+
+        string actorName = element.contents.Substring(
+            prefix.Length,
+            actorEnd - prefix.Length);
+        sanitized = prefix + actorName
+            + ". Treat it as authoritative dialogue from "
+            + actorName + ".";
+        return true;
+    }
+
+    private static string TransformAwayPromptText(
+        DialoguePromptContext context,
+        DialoguePromptTextSection section,
+        string text)
+    {
+        string playerName = context.Player != null
+            ? context.Player.playerName
+            : GetPlayerName();
+        if (section == DialoguePromptTextSection.WorldLore)
+        {
+            return RemovePlayerParagraphs(text, playerName);
+        }
+
+        string result = RemovePlayerCharacterBlock(
+            text,
+            playerName,
+            context.Npc.GetFinalName());
+        result = result.Replace(
+            "POV: Write in second person present tense from "
+            + playerName + "'s point of view.",
+            "POV: Write in third person present tense, centered on the NPCs "
+            + "who are still present.");
+        result = string.Join(
+            "\n",
+            result.Replace("\r\n", "\n")
+                .Split('\n')
+                .Where(line =>
+                    !ContainsPlayerScaffolding(line, playerName)));
+        return Regex.Replace(result, "\n{3,}", "\n\n");
+    }
+
+    private static string RemovePlayerCharacterBlock(
+        string text,
+        string playerName,
+        string npcName)
+    {
+        string startMarker =
+            "\n\nThis is the character description of " + playerName
+            + ", the player's character:\n";
+        string endMarker =
+            "\n\nThis is the character description of " + npcName + ":\n";
+        int start = text.IndexOf(startMarker, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            return text;
+        }
+        int end = text.IndexOf(
+            endMarker,
+            start + startMarker.Length,
+            StringComparison.Ordinal);
+        return end >= 0 ? text.Remove(start, end - start) : text;
+    }
+
+    private static string RemovePlayerParagraphs(
+        string text,
+        string playerName)
+    {
+        string[] paragraphs = Regex.Split(
+            text.Replace("\r\n", "\n"),
+            "\n{2,}");
+        return string.Join(
+            "\n\n",
+            paragraphs.Where(paragraph =>
+                !ContainsPlayerScaffolding(paragraph, playerName)));
+    }
+
+    private static bool ContainsPlayerScaffolding(
+        string text,
+        string playerName)
+    {
+        return text.IndexOf(
+                   playerName,
+                   StringComparison.OrdinalIgnoreCase) >= 0 ||
+               text.IndexOf(
+                   "the player",
+                   StringComparison.OrdinalIgnoreCase) >= 0 ||
+               text.IndexOf(
+                   "player's character",
+                   StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
     internal static bool TryGetCounterpart(out NeuralNPC counterpart)
     {
         counterpart = null;
@@ -168,6 +371,53 @@ internal static class ConversationObserverController
     private static bool HasLoadedPortrait(NeuralNPC npc)
     {
         return npc != null && NpcDialogSpriteField.GetValue(npc) is Sprite;
+    }
+
+    internal static void GetPlayerSidePortraitPlacement(
+        NeuralNPC npc,
+        out float scale,
+        out Vector2 offset)
+    {
+        if (TryGetPlayerCharacterAssets(npc, out CharacterAssetPack assets))
+        {
+            scale = assets.dialogSpriteScale;
+            offset = new Vector2(
+                assets.dialogSpriteOffsetX,
+                assets.dialogSpriteOffsetY);
+            return;
+        }
+
+        scale = npc.dialogSpriteScale;
+        offset = new Vector2(
+            PortraitSideOffsetX - npc.dialogSpriteOffset.x,
+            npc.dialogSpriteOffset.y);
+    }
+
+    private static bool TryGetPlayerCharacterAssets(
+        NeuralNPC npc,
+        out CharacterAssetPack assets)
+    {
+        assets = null;
+        if (npc == null)
+        {
+            return false;
+        }
+
+        CustomNPCHandler handler = npc.GetComponent<CustomNPCHandler>();
+        string definitionName = handler != null
+            ? handler.customContentName
+            : npc.GetFinalName();
+        return !string.IsNullOrWhiteSpace(definitionName)
+            && CustomContentDefinition_NPC.loaded.TryGetValue(
+                definitionName,
+                out CustomContentDefinition_NPC npcDefinition)
+            && npcDefinition.enabled
+            && !string.IsNullOrWhiteSpace(
+                npcDefinition.customPlayerCharacterDefinitionName)
+            && CustomContentDefinition_PlayerCharacter.loaded.TryGetValue(
+                npcDefinition.customPlayerCharacterDefinitionName,
+                out CustomContentDefinition_PlayerCharacter playerDefinition)
+            && (assets = playerDefinition.assets) != null;
     }
 
     internal static void UpdateActingInput()
@@ -368,6 +618,15 @@ internal static class AwaySpeakerSelectionPatch
         {
             ConversationObserverController.Rejoin();
         }
+        else
+        {
+            // Silverpine's native history pruner expects a Player or System
+            // entry to separate runs of NPC turns. Without this boundary, a
+            // sufficiently long away-mode exchange can leave only dialog
+            // markers and make its First(...) call throw.
+            ConversationObserverController.RecordAwayContinuationBoundary(
+                nextSpeaker);
+        }
         __result = Task.FromResult(nextSpeaker);
         return false;
     }
@@ -388,8 +647,10 @@ internal static class AwayPortraitPatch
         }
 
         playerSprite = counterpart.GetDialogSprite();
-        playerSpriteScale = counterpart.dialogSpriteScale;
-        playerSpriteOffset = counterpart.dialogSpriteOffset;
+        ConversationObserverController.GetPlayerSidePortraitPlacement(
+            counterpart,
+            out playerSpriteScale,
+            out playerSpriteOffset);
     }
 }
 
