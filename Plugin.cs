@@ -21,7 +21,7 @@ public sealed class Plugin : BaseUnityPlugin
 {
     public const string PluginGuid = "salt.silverpine.conversationobserver";
     public const string PluginName = "Conversation Observer";
-    public const string PluginVersion = "1.0.4";
+    public const string PluginVersion = "1.0.5";
 
     private Harmony _harmony;
 
@@ -64,7 +64,8 @@ internal static class ConversationObserverController
                 Id = AwayPromptTransformId,
                 Order = -1000,
                 IsActive = _ => IsPlayerAway,
-                TransformHistory = FilterAwayPromptHistory,
+                // Keep every historical turn, including earlier player input.
+                // Departure changes current presence, not conversation memory.
                 TransformText = TransformAwayPromptText
             });
         DialogueActions.Register(
@@ -164,100 +165,6 @@ internal static class ConversationObserverController
             + nextSpeaker.GetFinalName() + ".");
     }
 
-    private static IEnumerable<NeuralNPC.DialogElement>
-        FilterAwayPromptHistory(
-            DialoguePromptContext context,
-            IReadOnlyList<NeuralNPC.DialogElement> history)
-    {
-        string playerName = context.Player != null
-            ? context.Player.playerName
-            : GetPlayerName();
-        string departurePrefix = playerName
-            + " stepped away and is no longer present in this conversation.";
-        int departureIndex = -1;
-        for (int index = history.Count - 1; index >= 0; index--)
-        {
-            NeuralNPC.DialogElement element = history[index];
-            if (element.speakerType == SpeakerType.System &&
-                element.contents.StartsWith(
-                    departurePrefix,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                departureIndex = index;
-                break;
-            }
-        }
-
-        if (departureIndex < 0)
-        {
-            return history.Where(element =>
-                element.speakerType != SpeakerType.Player);
-        }
-
-        var filtered = new List<NeuralNPC.DialogElement>();
-        for (int index = departureIndex; index < history.Count; index++)
-        {
-            NeuralNPC.DialogElement element = history[index];
-            if (element.speakerType == SpeakerType.Player)
-            {
-                continue;
-            }
-            if (index == departureIndex)
-            {
-                filtered.Add(element);
-                continue;
-            }
-            if (element.speakerType == SpeakerType.System &&
-                TrySanitizeImpersonatedTurn(element, out string sanitized))
-            {
-                filtered.Add(new NeuralNPC.DialogElement(
-                    SpeakerType.System,
-                    sanitized,
-                    element.turnCount));
-                continue;
-            }
-            if (element.speakerType == SpeakerType.System &&
-                ContainsPlayerScaffolding(element.contents, playerName))
-            {
-                continue;
-            }
-            filtered.Add(element);
-        }
-        return filtered;
-    }
-
-    private static bool TrySanitizeImpersonatedTurn(
-        NeuralNPC.DialogElement element,
-        out string sanitized)
-    {
-        const string prefix =
-            "The preceding line was directly spoken in-scene by ";
-        sanitized = "";
-        if (!element.contents.StartsWith(
-                prefix,
-                StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        int actorEnd = element.contents.IndexOf(
-            ", not by ",
-            prefix.Length,
-            StringComparison.OrdinalIgnoreCase);
-        if (actorEnd <= prefix.Length)
-        {
-            return false;
-        }
-
-        string actorName = element.contents.Substring(
-            prefix.Length,
-            actorEnd - prefix.Length);
-        sanitized = prefix + actorName
-            + ". Treat it as authoritative dialogue from "
-            + actorName + ".";
-        return true;
-    }
-
     private static string TransformAwayPromptText(
         DialoguePromptContext context,
         DialoguePromptTextSection section,
@@ -268,11 +175,21 @@ internal static class ConversationObserverController
             : GetPlayerName();
         if (section == DialoguePromptTextSection.WorldLore)
         {
-            return RemovePlayerParagraphs(text, playerName);
+            // Native lore includes long-term conversation memories.
+            return text;
         }
 
+        // Silverpine prepends compressed memories and event knowledge before
+        // the live environment. Preserve that prefix, even when it mentions
+        // the player; only the current scene needs presence/POV adjustments.
+        const string environmentStart = "\n\nCurrent time: ";
+        int environmentIndex = text.IndexOf(
+            environmentStart,
+            StringComparison.Ordinal);
+        int prefixLength = environmentIndex >= 0 ? environmentIndex + 2 : 0;
+        string memoryPrefix = text.Substring(0, prefixLength);
         string result = RemovePlayerCharacterBlock(
-            text,
+            text.Substring(prefixLength),
             playerName,
             context.Npc.GetFinalName());
         result = result.Replace(
@@ -286,7 +203,7 @@ internal static class ConversationObserverController
                 .Split('\n')
                 .Where(line =>
                     !ContainsPlayerScaffolding(line, playerName)));
-        return Regex.Replace(result, "\n{3,}", "\n\n");
+        return memoryPrefix + Regex.Replace(result, "\n{3,}", "\n\n");
     }
 
     private static string RemovePlayerCharacterBlock(
@@ -309,19 +226,6 @@ internal static class ConversationObserverController
             start + startMarker.Length,
             StringComparison.Ordinal);
         return end >= 0 ? text.Remove(start, end - start) : text;
-    }
-
-    private static string RemovePlayerParagraphs(
-        string text,
-        string playerName)
-    {
-        string[] paragraphs = Regex.Split(
-            text.Replace("\r\n", "\n"),
-            "\n{2,}");
-        return string.Join(
-            "\n\n",
-            paragraphs.Where(paragraph =>
-                !ContainsPlayerScaffolding(paragraph, playerName)));
     }
 
     private static bool ContainsPlayerScaffolding(

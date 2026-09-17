@@ -14,12 +14,18 @@ named **Step Away** whenever at least two NPCs are participating.
 Automatic NPC turns include hidden system boundaries so Silverpine's native
 dialogue-history pruning remains valid during long NPC-only exchanges.
 
-While away, a Modding Tools prompt transform begins the generated conversation
-context at the departure notice, removes player-authored turns and
-player-specific prompt scaffolding, and changes Silverpine's normal
+Stepping away preserves the full available conversation history in the prompt,
+including earlier player, NPC, and system turns. The departure notice establishes
+that the player is no longer present without discarding the prior conversation.
+Silverpine's normal context limits, memory compression, and memory retrieval
+still apply. Compressed memories and lore are preserved, including references
+to earlier interactions with the player.
+
+While away, a Modding Tools text transform removes player-specific scaffolding
+from the current environment section and changes Silverpine's normal
 second-person player POV to third-person narration centered on the NPCs still
-present. These changes affect prompt copies only; **Interrupt** restores normal
-prompt construction without altering the stored conversation history.
+present. Historical dialogue entries are neither filtered nor rewritten by this
+transform. **Interrupt** restores normal prompt construction.
 
 While the player is away, the player portrait slot shows a different active
 participant from the NPC in the normal NPC slot. The two slots never select the
